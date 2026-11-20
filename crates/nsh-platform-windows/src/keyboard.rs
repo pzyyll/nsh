@@ -53,12 +53,15 @@ use nsh_core::{
 use rustc_hash::FxHashMap;
 #[cfg(test)]
 use windows::Win32::UI::Input::KeyboardAndMouse::SetKeyboardState;
-use windows::Win32::UI::{
-    Input::KeyboardAndMouse::{
-        GetFocus, GetKeyState, GetKeyboardLayout, GetKeyboardState, HKL, MAPVK_VK_TO_CHAR,
-        MapVirtualKeyExW, SetFocus, ToUnicodeEx, VK_NUMLOCK,
+use windows::Win32::{
+    Foundation::HWND,
+    UI::{
+        Input::KeyboardAndMouse::{
+            GetFocus, GetKeyState, GetKeyboardLayout, GetKeyboardState, HKL, MAPVK_VK_TO_CHAR,
+            MapVirtualKeyExW, SetFocus, ToUnicodeEx, VK_NUMLOCK,
+        },
+        WindowsAndMessaging::{MSG, WM_KEYDOWN, WM_SYSKEYDOWN},
     },
-    WindowsAndMessaging::{MSG, WM_KEYDOWN, WM_SYSKEYDOWN},
 };
 
 use crate::{app_window::window_of, input::KeyEvent, surface::Surface, view::NshView};
@@ -309,6 +312,27 @@ fn take_keyboard(surface: &Surface, view: &NshView) {
         return;
     }
     // SAFETY: plain calls on a window of this thread.
+    unsafe {
+        if GetFocus() != hwnd {
+            let _ = SetFocus(Some(hwnd));
+        }
+    }
+}
+
+/// Window `window`, shown by `hwnd`, takes the keyboard: a view or field the
+/// app focused while it was hidden asked for it when `SetFocus` reached no
+/// window. Nothing focused means nothing to restore.
+pub(crate) fn restore_keyboard(surface: &Surface, hwnd: HWND, window: NodeId) {
+    if hwnd.is_invalid() {
+        return;
+    }
+    let held = surface.keyboard.focus.borrow().contains_key(&window)
+        || crate::text_input::focused(surface)
+            .is_some_and(|field| window_of(surface, &field) == window);
+    if !held {
+        return;
+    }
+    // SAFETY: a plain call on a live window of the app's own.
     unsafe {
         if GetFocus() != hwnd {
             let _ = SetFocus(Some(hwnd));

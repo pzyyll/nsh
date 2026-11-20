@@ -39,7 +39,10 @@ use windows::{
                 ValidateRect,
             },
         },
-        System::{LibraryLoader::GetModuleHandleW, Threading::GetCurrentThreadId},
+        System::{
+            LibraryLoader::GetModuleHandleW,
+            Threading::{AttachThreadInput, GetCurrentThreadId},
+        },
         UI::{
             Controls::WM_MOUSELEAVE,
             HiDpi::{AdjustWindowRectExForDpi, GetDpiForWindow},
@@ -662,8 +665,21 @@ pub(crate) fn show_as_it_is(hwnd: HWND) {
         let _ = UpdateWindow(hwnd);
     }
     crate::shell::shown(hwnd);
-    if activate && background {
-        set_foreground(hwnd);
+    if !activate {
+        return;
+    }
+    // `SW_SHOW`'s activation is refused while the user works in another
+    // process: a window opened by a global shortcut or a background
+    // notification still has to take the foreground its `activate` asks for.
+    set_foreground(hwnd);
+    // The app focused a view or field while the window was hidden, when
+    // `SetFocus` reached no window: give it the keyboard now that there is
+    // one. A window the foreground stayed away from keeps it unclaimed.
+    if !background
+        && foreground() == hwnd
+        && let Some(surface) = surface_of(hwnd)
+    {
+        crate::keyboard::restore_keyboard(&surface, hwnd, app_window_root(hwnd).unwrap_or(ROOT_ID));
     }
 }
 
@@ -712,8 +728,7 @@ pub(crate) fn foreground() -> HWND {
 /// on `WM_SETFOCUS`), and it and the window that had it report their state.
 pub(crate) fn set_foreground(hwnd: HWND) {
     if !in_background() {
-        // SAFETY: a plain call on a live window.
-        let _ = unsafe { SetForegroundWindow(hwnd) };
+        take_foreground(hwnd);
         return;
     }
     let old = BACKGROUND_KEY.replace(Some(hwnd));
@@ -730,6 +745,34 @@ pub(crate) fn set_foreground(hwnd: HWND) {
         match app_window_root(h) {
             Some(id) => crate::app_window::state_changed(&surface, id),
             None => crate::window_state::report_main(&surface),
+        }
+    }
+}
+
+/// Brings `hwnd` to the foreground even while the user works in another
+/// process. Windows lets only the foreground process change the foreground
+/// window, so the call is made with the foreground thread's input state
+/// attached; a hotkey's allowance ends with its own handler, which the
+/// engine, running on a thread of its own, has already left.
+fn take_foreground(hwnd: HWND) {
+    // SAFETY: plain calls on live windows.
+    unsafe {
+        let foreground = GetForegroundWindow();
+        if foreground == hwnd {
+            return;
+        }
+        let foreground_thread = if foreground.is_invalid() {
+            0
+        } else {
+            GetWindowThreadProcessId(foreground, None)
+        };
+        let thread = GetCurrentThreadId();
+        let attached = foreground_thread != 0
+            && foreground_thread != thread
+            && AttachThreadInput(thread, foreground_thread, true).as_bool();
+        let _ = SetForegroundWindow(hwnd);
+        if attached {
+            let _ = AttachThreadInput(thread, foreground_thread, false);
         }
     }
 }

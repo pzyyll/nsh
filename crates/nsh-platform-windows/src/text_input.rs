@@ -2460,6 +2460,91 @@ mod tests {
         );
     }
 
+    /// Temporary diagnostics for the line spacing (to be removed).
+    #[test]
+    fn zz_diag_line_spacing() {
+        use windows::Win32::UI::Controls::RichEdit::PARAFORMAT2;
+        let mut out = String::new();
+        for rich in [false, true] {
+            for d2d in [true, false] {
+                for how in 0..4 {
+                    for (rule, twips) in [(4u8, 400), (4, 800), (3, 800), (2, 0)] {
+                        let config = InputConfig {
+                            multiline: true,
+                            ..Default::default()
+                        };
+                        let mut bits = base_bits(&config);
+                        if !d2d {
+                            bits &= !TXTBIT_D2DDWRITE;
+                        }
+                        let editor = Editor::new(
+                            HWND::default(),
+                            Props {
+                                client: RECT {
+                                    right: 800,
+                                    bottom: 2000,
+                                    ..Default::default()
+                                },
+                                bits,
+                                ..Default::default()
+                            },
+                            Box::new(|| {}),
+                            Box::new(|| {}),
+                        )
+                        .expect("RichEdit");
+                        let mode = if rich { 2usize } else { TM_PLAINTEXT.0 as usize };
+                        let (mr, _) = editor.send(EM_SETTEXTMODE, mode, 0);
+                        // how 3: format before the text.
+                        if how != 3 {
+                            editor.set_text(&["The quick brown fox"; 12].join("\r"));
+                        }
+                        editor.update(
+                            |p| {
+                                let pf = &mut p.para_format;
+                                pf.Base.dwMask = PFM_LINESPACING;
+                                pf.bLineSpacingRule = rule;
+                                pf.dyLineSpacing = twips;
+                            },
+                            TXTBIT_PARAFORMATCHANGE,
+                        );
+                        let mut set = -9;
+                        if how == 1 || how == 3 {
+                            let mut para = editor.props().para_format;
+                            set = editor.send(EM_SETPARAFORMAT, 0, &mut para as *mut _ as isize).0.0 as i32;
+                        }
+                        if how == 2 {
+                            editor.send(0x00B1, 0, -1); // EM_SETSEL all
+                            let mut para = editor.props().para_format;
+                            set = editor.send(EM_SETPARAFORMAT, 0, &mut para as *mut _ as isize).0.0 as i32;
+                            editor.send(0x00B1, 0, 0);
+                        }
+                        if how == 3 {
+                            editor.set_text(&["The quick brown fox"; 12].join("\r"));
+                        }
+                        let lines = editor.send(0x00BA, 0, 0).0.0;
+                        let y = |line: usize| {
+                            let (index, _) = editor.send(0x00BB, line, 0);
+                            let mut at = windows::Win32::Foundation::POINTL::default();
+                            editor.send(0x00D6, &mut at as *mut _ as usize, index.0);
+                            at.y
+                        };
+                        let (y0, y1, y11) = (y(0), y(1), y(11));
+                        editor.send(0x00B1, 0, -1);
+                        let mut back = PARAFORMAT2::default();
+                        back.Base.cbSize = size_of::<PARAFORMAT2>() as u32;
+                        let (gm, _) = editor.send(0x043D, 0, &mut back as *mut _ as isize); // EM_GETPARAFORMAT
+                        let h = editor.text_height(800).unwrap_or(-1);
+                        out += &format!(
+                            "\nrich={rich} d2d={d2d} how={how} rule={rule} twips={twips}: mode={} set={set} lines={lines} y0={y0} y1={y1} y11={y11} h={h} | get mask={:#x} rule={} dy={} (ret {:#x})",
+                            mr.0, back.Base.dwMask.0, back.bLineSpacingRule, back.dyLineSpacing, gm.0
+                        );
+                    }
+                }
+            }
+        }
+        panic!("DIAG{out}");
+    }
+
     #[test]
     fn stop_and_destroy_forget_the_focus() {
         let surface = Surface::new(Default::default());

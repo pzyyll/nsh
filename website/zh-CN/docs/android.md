@@ -342,6 +342,16 @@ if answers[0] == Permission::Granted {
 `Undeclared`，不显示提示框。前台没有 activity（应用在后台），或 activity 在用户回答前结束时，申请以 `PermissionError::NoActivity`
 失败。NSH 自己的提示框（通知、网页的相机和麦克风）也这样申请，所以一个申请会等前面正在显示的提示框结束。
 
+## 在 Rust 中启动 activity
+
+需要启动另一个应用并取回结果（相机应用、文档选择器）的 Rust 代码，使用同一个 crate 的 `activity`。`start_for_result(env, &intent)`
+从前台的 activity 启动它，并返回它的 `ActivityResult`（结果码和对方返回的 intent），能跨越配置变更；`can_start(env, &intent)`
+判断是否有已安装的应用响应这个 intent。Android 11+ 只让应用看到 manifest 里查询过的应用：crate 在自己的 `Cargo.toml` 里声明这些查询
+（[打包的应用需要什么](./nshm.md#打包的应用需要什么)）。`output_file(env, name)` 在应用缓存里新建一个文件，并给出对方通过应用的
+file provider 写入的 `content://` URI（`MediaStore.EXTRA_OUTPUT`）；`picker::prepare_image(path, name, &request)` 像
+`Picker.pickImages` 一样处理一个图片文件。`with_env(f)` 用当前线程的 JNI 环境运行 `f`。`nsh-extra` 的相机
+（`crates/nsh-extra/src/camera/android.rs`）用到了它们全部。
+
 ## 限制
 
 ```java

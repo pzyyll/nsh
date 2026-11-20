@@ -49,6 +49,16 @@ final class Permissions {
 
     private Permissions() {}
 
+    /** The application, or {@code null} before any {@code NshView} was made. Any thread. */
+    static Context application() {
+        return application;
+    }
+
+    /** The activity in front, or {@code null}. UI thread. */
+    static Activity front() {
+        return front.get();
+    }
+
     /**
      * Follows the activity in front from now on ({@code context} being a view's), which Rust code's requests ask
      * through: the packaged app's or an embedding app's. UI thread.

@@ -23,9 +23,17 @@
 //! which the app commits: a build takes the locked commit, never what a tag
 //! or branch points to now. An nshm is an ordinary Cargo library with a
 //! `#[native_module("<module>")]` entry at its root, the specifier TSX
-//! imports it by; it needs no NSH-specific metadata. The NSH versions it
-//! builds with are its own `nsh-core` dependency requirement, checked
-//! against this CLI before anything compiles.
+//! imports it by. The NSH versions it builds with are its own `nsh-core`
+//! dependency requirement, checked against this CLI before anything
+//! compiles.
+//!
+//! An entry's `"features"` (`nsh add nsh-extra --features camera`) are the
+//! crate's Cargo features the app turns on: a crate of several modules
+//! keeps each behind a feature, so an app links only those it uses. What a
+//! crate needs of the packaged app (an `Info.plist` key, a manifest entry)
+//! it may declare in its `Cargo.toml`, under `[package.metadata.nsh]` or a
+//! feature's `[package.metadata.nsh.features.<name>]`; `nsh` merges what
+//! the enabled features declare into the app's ([`crate::module_meta`]).
 //!
 //! Each locked commit is checked out once in nsh's cache
 //! (`<cache>/nshm/<repository>/<commit>`) and linked into the app's
@@ -71,6 +79,10 @@ pub(crate) struct Source {
     /// A local directory.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
+    /// The crate's Cargo features to turn on: the modules of it the app
+    /// uses (`nsh add nsh-extra --features camera`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub features: Vec<String>,
 }
 
 impl Source {
@@ -90,6 +102,26 @@ impl Source {
             .or(self.krate.as_deref())
             .or(self.path.as_deref())
             .unwrap_or_default()
+    }
+
+    /// The same source without its features: what `nsh.lock` keys its
+    /// entries by, so turning a feature on resolves nothing again.
+    fn place(&self) -> Source {
+        Source {
+            features: Vec::new(),
+            ..self.clone()
+        }
+    }
+
+    /// The same source with `features` on, each once, in order.
+    pub(crate) fn with_features(mut self, features: Vec<String>) -> anyhow::Result<Self> {
+        for feature in features {
+            if !self.features.contains(&feature) {
+                self.features.push(feature);
+            }
+        }
+        self.validate()?;
+        Ok(self)
     }
 
     /// Checks it names exactly one place.
@@ -120,6 +152,14 @@ impl Source {
                     self.id()
                 )
             })?;
+        }
+        for feature in &self.features {
+            if !is_feature_name(feature) {
+                bail!(
+                    "nsh.json: \"modules\": {}: {feature:?} is not a Cargo feature's name",
+                    self.id()
+                );
+            }
         }
         Ok(())
     }
@@ -202,6 +242,12 @@ impl Source {
     /// How `nsh.json` lists it: a string when it can be one.
     fn entry(&self) -> serde_json::Value {
         use serde_json::{Value, json};
+        if !self.features.is_empty() {
+            // Only the object form has room for features.
+            let mut o = self.object();
+            o["features"] = json!(self.features);
+            return o;
+        }
         if let Some(name) = &self.krate {
             return Value::String(match &self.version {
                 Some(v) => format!("{name}@{v}"),
@@ -249,6 +295,33 @@ impl Source {
         }
     }
 
+    /// The object form of its entry: `{ "crate" | "git" | "github" |
+    /// "path": ..., "version", "tag", "rev" }`, without its features.
+    fn object(&self) -> serde_json::Value {
+        use serde_json::json;
+        let mut o = if let Some(name) = &self.krate {
+            json!({ "crate": name })
+        } else if let Some(path) = &self.path {
+            json!({ "path": path })
+        } else {
+            let url = self.git.clone().unwrap_or_default();
+            match github_repo(&url) {
+                Some(repo) => json!({ "github": repo }),
+                None => json!({ "git": url }),
+            }
+        };
+        if let Some(t) = &self.tag {
+            o["tag"] = json!(t);
+        }
+        if let Some(r) = &self.rev {
+            o["rev"] = json!(r);
+        }
+        if let Some(v) = &self.version {
+            o["version"] = json!(v);
+        }
+        o
+    }
+
     /// Reads an entry of `nsh.json` `"modules"`.
     fn from_entry(value: &serde_json::Value) -> anyhow::Result<Self> {
         if let Some(s) = value.as_str() {
@@ -257,15 +330,19 @@ impl Source {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct Full {
+            #[serde(rename = "crate")]
+            krate: Option<String>,
             git: Option<String>,
             github: Option<String>,
             tag: Option<String>,
             rev: Option<String>,
             path: Option<String>,
             version: Option<String>,
+            #[serde(default)]
+            features: Vec<String>,
         }
         let full: Full = serde_json::from_value(value.clone()).context(
-            "nsh.json: \"modules\": each is \"<crate>[@<version>]\", \"github:<owner>/<repo>[@<tag>]\", { \"git\" | \"github\": ..., \"tag\" | \"rev\" } or { \"path\": \"<dir>\" }",
+            "nsh.json: \"modules\": each is \"<crate>[@<version>]\", \"github:<owner>/<repo>[@<tag>]\", { \"crate\": ..., \"version\" }, { \"git\" | \"github\": ..., \"tag\" | \"rev\" } or { \"path\": \"<dir>\" }, each object with optional \"features\"",
         )?;
         if full.git.is_some() && full.github.is_some() {
             bail!("nsh.json: \"modules\": an entry has both \"git\" and \"github\"");
@@ -275,12 +352,24 @@ impl Source {
             tag: full.tag,
             rev: full.rev,
             path: full.path,
+            krate: full.krate,
             version: full.version,
-            ..Default::default()
+            features: Vec::new(),
         };
+        let source = source.with_features(full.features)?;
         source.validate()?;
         Ok(source)
     }
+}
+
+/// Whether `name` can be a Cargo feature's: letters, digits, `_`, `-`,
+/// `+` and `.`, starting with a letter, a digit or `_`.
+fn is_feature_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '+' | '.'))
 }
 
 /// `https://github.com/<repo>`.
@@ -350,18 +439,21 @@ pub(crate) fn crates(
             let package = rust_app::package_name(&checkout.join("Cargo.toml"))?;
             check(&checkout, path)?;
             check_version(&checkout, source)?;
-            crates.push((path.clone(), AppCrate::new(package, checkout)));
+            let krate = AppCrate::new(package, checkout).with_features(source.features.clone());
+            crates.push((path.clone(), krate));
             continue;
         }
-        let entry = match lock.modules.iter().find(|l| l.source == *source) {
+        let key = source.place();
+        let entry = match lock.modules.iter().find(|l| l.source == key) {
             Some(entry) => entry.clone(),
-            None => resolve(source)?,
+            None => resolve(&key)?,
         };
         let checkout = place(&entry)?;
         let package = rust_app::package_name(&checkout.join("Cargo.toml"))?;
         check(&checkout, source.id())?;
         check_version(&checkout, source)?;
-        crates.push((source.id().to_owned(), AppCrate::new(package, checkout)));
+        let krate = AppCrate::new(package, checkout).with_features(source.features.clone());
+        crates.push((source.id().to_owned(), krate));
         locked.push(entry);
     }
     let new = Lock {
@@ -453,28 +545,33 @@ pub(crate) fn add(dir: &Path, source: Source) -> anyhow::Result<()> {
         all.extend(modules);
         rust_app::check_crates(&all)?;
         let lock = read_lock(dir)?;
-        let entry = lock.modules.iter().find(|l| l.source == source).cloned();
+        let place = source.place();
+        let entry = lock.modules.iter().find(|l| l.source == place).cloned();
         // The app's crate uses it from Rust too (`use acme_ui::Gauge`).
         if let Some(crate_dir) = &app_crate {
             let manifest = crate_dir.join("Cargo.toml");
             let package = rust_app::package_name(&added.dir().join("Cargo.toml"))?;
-            let dependency = match &entry {
+            let place = match &entry {
                 Some(Locked {
                     commit: Some(commit),
                     ..
-                }) => Dependency::Git {
+                }) => Place::Git {
                     url: id.clone(),
                     commit: commit.clone(),
                 },
                 Some(Locked {
                     resolved: Some(version),
                     ..
-                }) => Dependency::Crate {
+                }) => Place::Crate {
                     version: version.clone(),
                 },
-                _ => Dependency::Path {
+                _ => Place::Path {
                     path: relative(crate_dir, added.dir()),
                 },
+            };
+            let dependency = Dependency {
+                place,
+                features: source.features.clone(),
             };
             let text = fs::read_to_string(&manifest)?;
             manifest_backup = Some((manifest.clone(), text.clone()));
@@ -509,9 +606,17 @@ pub(crate) fn add(dir: &Path, source: Source) -> anyhow::Result<()> {
     }
 }
 
-/// How the app's crate depends on an nshm.
+/// How the app's crate depends on an nshm: from where, with which
+/// features.
 #[derive(Debug)]
-enum Dependency {
+struct Dependency {
+    place: Place,
+    features: Vec<String>,
+}
+
+/// Where the app's crate takes an nshm from.
+#[derive(Debug)]
+enum Place {
     Git { url: String, commit: String },
     Crate { version: String },
     Path { path: String },
@@ -520,10 +625,14 @@ enum Dependency {
 impl Dependency {
     /// Its value in `[dependencies]`.
     fn value(&self) -> String {
-        match self {
-            Dependency::Git { url, commit } => format!("{{ git = {url:?}, rev = {commit:?} }}"),
-            Dependency::Crate { version } => format!("{version:?}"),
-            Dependency::Path { path } => format!("{{ path = {path:?} }}"),
+        let features = rust_app::features_value(&self.features);
+        match &self.place {
+            Place::Git { url, commit } => {
+                format!("{{ git = {url:?}, rev = {commit:?}{features} }}")
+            }
+            Place::Crate { version } if features.is_empty() => format!("{version:?}"),
+            Place::Crate { version } => format!("{{ version = {version:?}{features} }}"),
+            Place::Path { path } => format!("{{ path = {path:?}{features} }}"),
         }
     }
 
@@ -531,10 +640,10 @@ impl Dependency {
     fn same_place(&self, line: &str) -> bool {
         let git = rust_app::toml_string(line, "git");
         let path = rust_app::toml_string(line, "path");
-        match self {
-            Dependency::Git { url, .. } => git.as_deref() == Some(url.as_str()),
-            Dependency::Crate { .. } => git.is_none() && path.is_none(),
-            Dependency::Path { .. } => path.is_some(),
+        match &self.place {
+            Place::Git { url, .. } => git.as_deref() == Some(url.as_str()),
+            Place::Crate { .. } => git.is_none() && path.is_none(),
+            Place::Path { .. } => path.is_some(),
         }
     }
 }
@@ -960,9 +1069,12 @@ mod tests {
     #[test]
     fn the_app_crate_depends_on_the_nshm() {
         let manifest = "[package]\nname = \"app\"\n\n[dependencies]\nnsh-core = \"0.6\"\n";
-        let at = |commit: &str| Dependency::Git {
-            url: "https://x/ui".into(),
-            commit: commit.into(),
+        let at = |commit: &str| Dependency {
+            place: Place::Git {
+                url: "https://x/ui".into(),
+                commit: commit.into(),
+            },
+            features: Vec::new(),
         };
         let new = with_dependency(manifest, "acme-ui", &at("abc"))
             .unwrap()
@@ -991,21 +1103,52 @@ mod tests {
         let other = "[dependencies]\nacme-ui = \"1\"\n";
         assert!(with_dependency(other, "acme-ui", &at("abc")).is_err());
         // From crates.io and a directory.
-        let krate = Dependency::Crate {
-            version: "1.2.0".into(),
+        let krate = Dependency {
+            place: Place::Crate {
+                version: "1.2.0".into(),
+            },
+            features: Vec::new(),
         };
         let new = with_dependency(manifest, "acme-ui", &krate)
             .unwrap()
             .unwrap();
         assert!(new.contains("acme-ui = \"1.2.0\""), "{new}");
-        let path = Dependency::Path {
-            path: "../ui".into(),
+        let path = Dependency {
+            place: Place::Path {
+                path: "../ui".into(),
+            },
+            features: Vec::new(),
         };
         assert!(with_dependency(&new, "acme-ui", &path).is_err());
         let new = with_dependency(manifest, "acme-ui", &path)
             .unwrap()
             .unwrap();
         assert!(new.contains("acme-ui = { path = \"../ui\" }"), "{new}");
+        // With the features the app turns on.
+        let featured = Dependency {
+            place: Place::Crate {
+                version: "0.6.0".into(),
+            },
+            features: vec!["camera".into()],
+        };
+        let new = with_dependency(manifest, "nsh-extra", &featured)
+            .unwrap()
+            .unwrap();
+        assert!(
+            new.contains("nsh-extra = { version = \"0.6.0\", features = [\"camera\"] }"),
+            "{new}"
+        );
+        let featured = Dependency {
+            place: Place::Git {
+                url: "https://x/extra".into(),
+                commit: "abc".into(),
+            },
+            features: vec!["camera".into(), "push".into()],
+        };
+        assert_eq!(
+            featured.value(),
+            "{ git = \"https://x/extra\", rev = \"abc\", features = [\"camera\", \"push\"] }"
+        );
     }
 
     #[test]
@@ -1035,8 +1178,8 @@ mod tests {
         let unknown = serde_json::json!({ "modules": [{ "git": "g", "branch": "main" }] });
         assert!(sources(&unknown).is_err());
         assert!(sources(&serde_json::json!({})).unwrap().is_empty());
-        let old = serde_json::json!({ "modules": [{ "crate": "a" }] });
-        assert!(sources(&old).is_err());
+        let krate = serde_json::json!({ "modules": [{ "crate": "a", "version": "1" }] });
+        assert_eq!(sources(&krate).unwrap()[0].krate.as_deref(), Some("a"));
         let two = serde_json::json!({ "modules": [{ "github": "a/b", "path": "../a" }] });
         assert!(sources(&two).is_err());
         let bad = serde_json::json!({ "modules": ["github:acme"] });
@@ -1045,6 +1188,43 @@ mod tests {
         assert!(sources(&req).is_err());
         let renamed = serde_json::json!({ "extensions": ["acme-ui@1.2"] });
         assert!(sources(&renamed).is_err());
+    }
+
+    #[test]
+    fn features_are_listed_and_locked_apart() {
+        let config = serde_json::json!({ "modules": [
+            { "crate": "nsh-extra", "version": "0.6", "features": ["camera"] },
+            { "github": "acme/ui", "tag": "v1", "features": ["charts", "maps"] },
+            { "path": "../extra", "features": ["camera"] }
+        ] });
+        let list = sources(&config).unwrap();
+        assert_eq!(list[0].features, ["camera"]);
+        assert_eq!(list[1].features, ["charts", "maps"]);
+        // Written back as it was: only the object form carries features.
+        let back: Vec<_> = list.iter().map(Source::entry).collect();
+        assert_eq!(serde_json::Value::Array(back), config["modules"]);
+        // `nsh.lock` keys an entry by its place: a feature turned on
+        // resolves nothing again.
+        assert_eq!(
+            list[0].place(),
+            Source::short("nsh-extra@0.6", None, None).unwrap()
+        );
+        // Each feature once, and only names Cargo takes.
+        let more = list[0]
+            .clone()
+            .with_features(vec!["camera".into(), "push".into()])
+            .unwrap();
+        assert_eq!(more.features, ["camera", "push"]);
+        for bad in ["", "a b", "dep:x", "a/b", "-a"] {
+            let config = serde_json::json!({ "modules": [{ "crate": "x", "features": [bad] }] });
+            assert!(sources(&config).is_err(), "{bad:?}");
+        }
+        assert!(
+            Source::short("nsh-extra", None, None)
+                .unwrap()
+                .with_features(vec!["dep:tokio".into()])
+                .is_err()
+        );
     }
 
     #[test]

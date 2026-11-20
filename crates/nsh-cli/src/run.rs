@@ -843,7 +843,19 @@ pub(crate) fn install_android_host(
     // device replaces what this app installed. The device's install time
     // tells whether the host there is still the one this app installed.
     let installed = work.join("android/installed");
-    let version = runtime_version(runtime, abis)?;
+    // What the app's crates declare for the manifest (the apps they start,
+    // their components): part of the build, as the runtime is.
+    let meta = crate::module_meta::for_dev_host("aarch64-linux-android");
+    let mut version = runtime_version(runtime, abis)?;
+    for line in meta
+        .android_permissions
+        .iter()
+        .chain(&meta.android_queries)
+        .chain(&meta.android_application)
+    {
+        version.push('\n');
+        version.push_str(line);
+    }
     let built =
         apk_path.exists() && fs::read_to_string(&stamp).ok().as_deref() == Some(version.as_str());
     if !built {
@@ -864,7 +876,9 @@ pub(crate) fn install_android_host(
                 microphone: true,
                 camera: true,
                 dex: &[],
-                permissions: &[],
+                permissions: &meta.android_permissions,
+                queries: &meta.android_queries,
+                application: &meta.android_application,
                 schemes: &[],
                 rust: false,
                 dark: false,
@@ -952,7 +966,10 @@ fn package_catalyst(work: &Path, host: &Path) -> anyhow::Result<PathBuf> {
     let contents = app.join("Contents");
     let macos = contents.join("MacOS");
     fs::create_dir_all(&macos)?;
-    fs::write(contents.join("Info.plist"), info_plist(Target::Catalyst))?;
+    fs::write(
+        contents.join("Info.plist"),
+        with_crates_info(info_plist(Target::Catalyst), "aarch64-apple-ios-macabi")?,
+    )?;
     install_binary(host, &macos.join("nsh-ios-host"))?;
     Ok(app)
 }
@@ -962,7 +979,10 @@ fn package_catalyst(work: &Path, host: &Path) -> anyhow::Result<PathBuf> {
 pub(crate) fn package_ios(work: &Path, host: &Path) -> anyhow::Result<PathBuf> {
     let app = work.join("ios").join(format!("{APP_NAME}.app"));
     fs::create_dir_all(&app)?;
-    fs::write(app.join("Info.plist"), info_plist(Target::Ios))?;
+    fs::write(
+        app.join("Info.plist"),
+        with_crates_info(info_plist(Target::Ios), "aarch64-apple-ios-sim")?,
+    )?;
     if install_binary(host, &app.join("nsh-ios-host"))? || !app.join("_CodeSignature").exists() {
         let status = Command::new("codesign")
             .args(["--force", "--sign", "-", "--timestamp=none"])
@@ -1244,6 +1264,32 @@ fn show_simulators(window: SimulatorWindow) {
         }
     }
     ui::warn("no Simulator or DeviceHub app found: the simulator runs without a window");
+}
+
+/// The development host's `Info.plist` with the keys the app's crates
+/// declare for `triple` ([`crate::module_meta`]) that it does not set.
+fn with_crates_info(plist: String, triple: &str) -> anyhow::Result<String> {
+    let meta = crate::module_meta::for_dev_host(triple);
+    if meta.ios_info.is_empty() {
+        return Ok(plist);
+    }
+    let crates = crate::apple::AppleConfig {
+        info_plist: meta.ios_info,
+        ..Default::default()
+    }
+    .info_plist(crate::apple::ApplePlatform::Ios)?;
+    let mut value = plist::Value::from_reader_xml(plist.as_bytes())?;
+    let dict = value
+        .as_dictionary_mut()
+        .context("the host's Info.plist is a dictionary")?;
+    for (key, value) in crates {
+        if !dict.contains_key(&key) {
+            dict.insert(key, value);
+        }
+    }
+    let mut out = Vec::new();
+    value.to_writer_xml(&mut out)?;
+    Ok(String::from_utf8(out)?)
 }
 
 fn info_plist(target: Target) -> String {

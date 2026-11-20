@@ -371,6 +371,18 @@ A request with no activity in front (the app is in the background), or whose act
 answers, fails with `PermissionError::NoActivity`. NSH's own prompts (notifications, a web page's camera and
 microphone) ask the same way, so a request waits for one already showing.
 
+## Activities from Rust
+
+Rust code that starts another app for a result (the camera app, a document picker) uses `activity` of the same crate.
+`start_for_result(env, &intent)` starts it from the activity in front and resolves with its `ActivityResult` (the
+result code and the intent the other app returned), across configuration changes; `can_start(env, &intent)` says
+whether an installed app answers the intent. Android 11+ shows an app only the apps its manifest queries: a crate
+declares its queries in its `Cargo.toml` ([What the packaged app needs](./nshm.md#what-the-packaged-app-needs)).
+`output_file(env, name)` makes a new file in the app's cache with a `content://` URI the other app writes through the
+app's file provider (`MediaStore.EXTRA_OUTPUT`), and `picker::prepare_image(path, name, &request)` prepares an image
+file as `Picker.pickImages` does. `with_env(f)` runs `f` with the thread's JNI environment. `nsh-extra`'s camera
+(`crates/nsh-extra/src/camera/android.rs`) uses all of them.
+
 ## Limits
 
 ```java

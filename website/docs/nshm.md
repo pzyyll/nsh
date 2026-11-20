@@ -103,11 +103,49 @@ It lists the nshm in `nsh.json` `"modules"`, pins the version or commit it resol
 }
 ```
 
+A crate that holds several modules keeps each behind a Cargo feature, so an app turns on only those it uses and pays
+only their size, permissions and store declarations. `--features` turns them on, and the entry takes the object form:
+
+```sh
+nsh add nsh-extra --features camera
+```
+
+```json
+{
+  "modules": [{ "crate": "nsh-extra", "version": "0.6", "features": ["camera"] }]
+}
+```
+
 [CLI: nsh add](./cli.md#nsh-add) covers every source form, version requirements and how the lock file is kept.
+
+## nsh-extra
+
+`nsh-extra` holds Native Shell's official modules: features that only some apps need, each a Cargo feature of the
+crate, imported from `nsh-extra` in TSX and called as `nsh_extra::<module>` in Rust.
+
+| Feature | TSX | What it does |
+|---|---|---|
+| `camera` | `Camera` | Takes a photo with the system's camera on iOS and Android |
+
+```tsx
+import { Camera } from "nsh-extra";
+
+if (await Camera.available()) {
+  // The photo comes as `Picker.pickImages` gives an image: a JPEG, upright, scaled natively.
+  const photo = await Camera.takePhoto({ maxDimension: 2048 });
+  if (photo) upload(photo.file);
+}
+```
+
+`takePhoto` resolves with `null` when the user cancels and rejects with the code `EACCES` when the user does not let
+the app use the camera. `available()` is `false` where there is no camera to show (the desktops, the web, a simulator),
+and there `takePhoto` rejects with `ERR_FEATURE_UNAVAILABLE_ON_PLATFORM`. The feature adds what the packaged app needs:
+the camera's usage description on iOS (an app sets its own wording with `ios.infoPlist`'s
+`NSCameraUsageDescription`) and the query of camera apps on Android.
 
 ## Writing an nshm
 
-An nshm is an ordinary Cargo library with a `#[native_module("<specifier>")]` entry at its root, the same as an app's own crate: the specifier is what TSX imports, and the function registers what it exports ([Extending a Rust app with TSX](./rust.md#extending-a-rust-app-with-tsx)). It needs no NSH-specific metadata. A small one:
+An nshm is an ordinary Cargo library with a `#[native_module("<specifier>")]` entry at its root, the same as an app's own crate: the specifier is what TSX imports, and the function registers what it exports ([Extending a Rust app with TSX](./rust.md#extending-a-rust-app-with-tsx)). A small one:
 
 ```toml
 # Cargo.toml
@@ -156,6 +194,34 @@ pub fn Gauge(props: GaugeProps) -> impl IntoElement {
 The NSH versions an nshm builds with are its own `nsh-core` requirement (`nsh-core = "0.6"`), which `nsh add` checks against the running `nsh` before anything compiles. Its TypeScript declarations are generated from its Rust types, so apps check their TSX against it as they do against their own crate.
 
 [nsh-omarchy's `src/lib.rs`](https://github.com/huacnlee/nsh-omarchy/blob/main/src/lib.rs) is a complete one: its components, exported to TSX by `#[native_module("nsh-omarchy")]`, with the `Omarchy` theme module.
+
+### What the packaged app needs
+
+An nshm that uses a system feature declares what the packaged app needs in its `Cargo.toml`, under
+`[package.metadata.nsh]`, or under a feature's `[package.metadata.nsh.features.<feature>]` when only that feature
+needs it. `nsh` adds the entries of every crate the app links, with the features Cargo turns on, to the packages and
+development hosts it builds:
+
+```toml
+[package.metadata.nsh.features.scanner.ios.info]
+NSCameraUsageDescription = "Scans the codes you point the camera at."
+
+[package.metadata.nsh.features.scanner.android]
+permissions = ["android.permission.CAMERA"]
+queries = ['<intent><action android:name="android.media.action.IMAGE_CAPTURE"/></intent>']
+application = ['<service android:name="com.example.scanner.Sync" android:exported="false"/>']
+```
+
+| Key | Adds |
+|---|---|
+| `ios.info` | Keys of the iOS app's `Info.plist` |
+| `ios.entitlements` | The iOS app's entitlements |
+| `android.permissions` | `<uses-permission>` elements, by full name |
+| `android.queries` | `<intent>`, `<package>` and `<provider>` elements of the manifest's `<queries>` |
+| `android.application` | `<service>`, `<receiver>`, `<provider>`, `<activity>` and `<meta-data>` elements of `<application>`; `${applicationId}` is the app's package |
+
+The app's own `nsh.json` wins: a key it sets keeps its value, and arrays (such as `UIBackgroundModes`) are joined. Two
+crates that set one key to different values stop the package with an error naming both.
 
 Develop it beside an app with `nsh add --path ../my-gauge`, which reads the directory as it is. Publish it as any crate (`cargo publish`), with the keyword `nshm` so that it can be found on [crates.io](https://crates.io/keywords/nshm), or push it to Git and share its URL.
 

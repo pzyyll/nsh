@@ -53,6 +53,17 @@ pub(crate) enum PackageTarget {
 }
 
 impl PackageTarget {
+    /// The platform [`crate::module_meta`] reads the app's dependency
+    /// graph for: iOS and Android, where crates declare package entries.
+    fn module_meta_triple(self) -> Option<&'static str> {
+        match self {
+            PackageTarget::Ios => Some("aarch64-apple-ios"),
+            PackageTarget::IosSimulator => Some("aarch64-apple-ios-sim"),
+            PackageTarget::Android => Some("aarch64-linux-android"),
+            _ => None,
+        }
+    }
+
     /// This machine's desktop target (`None` off macOS, Windows and
     /// Linux): where `--target gpui` points.
     pub(crate) fn desktop() -> Option<PackageTarget> {
@@ -299,6 +310,14 @@ pub(crate) struct AndroidConfig {
     /// as it is. Declaring a runtime permission does not grant it.
     #[serde(default)]
     pub(crate) permissions: Vec<String>,
+    /// Elements of the manifest's `<queries>` the app's crates declare
+    /// ([`crate::module_meta`]); not an `nsh.json` key.
+    #[serde(skip)]
+    pub(crate) queries: Vec<String>,
+    /// Elements of the manifest's `<application>` the app's crates declare
+    /// ([`crate::module_meta`]); not an `nsh.json` key.
+    #[serde(skip)]
+    pub(crate) application: Vec<String>,
     /// What the app's window shows from the tap on its icon until its first
     /// frame, the same keys as `ios.launchScreen`: the window's background
     /// and, on Android 12+, the splash screen's color and image. Without it
@@ -1239,7 +1258,7 @@ fn trimmed_runner(entry: &Path, target: PackageTarget) -> bool {
     }
 }
 
-pub(crate) fn package(options: PackageOptions<'_>) -> anyhow::Result<()> {
+pub(crate) fn package(mut options: PackageOptions<'_>) -> anyhow::Result<()> {
     if options.asset_url.is_some() && options.target != PackageTarget::Web {
         bail!("--asset-url is where a web site's files are served from: package with --target web");
     }
@@ -1285,6 +1304,17 @@ pub(crate) fn package(options: PackageOptions<'_>) -> anyhow::Result<()> {
         }
     }
     let entry = dunce::canonicalize(options.entry)?;
+    // What the app's crates and nshm declare for the package (an
+    // `Info.plist` key, a manifest entry), under what `nsh.json` sets.
+    if let Some(triple) = options.target.module_meta_triple()
+        && let Some(app) = crate::rust_app::current()
+    {
+        crate::module_meta::ModuleMeta::of_workspace(
+            &app.workspace().join("Cargo.toml"),
+            Some(triple),
+        )?
+        .apply(&mut options.config);
+    }
     let config = &options.config;
     let (name, id) = release_name_and_id(&entry, config)?;
     let schemes = config.url_schemes();
@@ -1671,6 +1701,8 @@ fn package_android(
             camera: config.web_media("camera"),
             dex: &config.android.dex,
             permissions: &permissions,
+            queries: &config.android.queries,
+            application: &config.android.application,
             schemes: &config.schemes,
             rust: built.rust_root,
             dark: config.appearance.as_deref() == Some("dark"),

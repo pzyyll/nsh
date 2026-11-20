@@ -360,6 +360,30 @@ final class Picker {
         }
     }
 
+    /**
+     * {@code nsh::picker::prepare_image}: the image file at {@code path} prepared as a pick prepares the photos
+     * picked ({@code maxDimension} 0: none; {@code quality} negative: none), named {@code name}, as {@code [name,
+     * type, bytes, int[] {width, height}]}; {@code null} when it is no image or before any {@code NshView} was
+     * made. Any thread but the UI thread's work is better kept off it.
+     */
+    static Object[] prepareFile(String path, String name, int maxDimension, float quality, boolean current) {
+        Context context = Permissions.application();
+        if (context == null) return null;
+        Request request = new Request();
+        request.limit = 1;
+        request.maxDimension = maxDimension;
+        request.quality = quality;
+        request.current = current;
+        try {
+            Picked file = prepare(context.getContentResolver(), Uri.fromFile(new java.io.File(path)), request);
+            if (file == null || file.bytes == null) return null;
+            return new Object[] {name, file.type, file.bytes, new int[] {file.width, file.height}};
+        } catch (Exception e) {
+            Log.w(TAG, "cannot prepare the image", e);
+            return null;
+        }
+    }
+
     private static Picked prepare(ContentResolver resolver, Uri uri, Request request) throws Exception {
         byte[] bytes = readAll(resolver, uri);
         if (bytes == null) return null;

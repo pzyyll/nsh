@@ -1054,7 +1054,22 @@ only is a `RustApp` too, its nsh crates this CLI's, as `runner_only`), checks th
 directory, package or `#[native_module]` specifier), and the workspace links each like an app crate. The app's crate
 depends on the nshm as `nsh add` writes it (Git at the locked `rev`, the resolved crate version, or a relative
 `path`), which the workspace's `[patch."<url>"]` / `[patch.crates-io]` sends to the same checkout. Before linking, the nshm must have a `#[native_module]` at its root
-(its module) and its `nsh-core` dependency requirement, if any, must match this CLI; there is no NSH-specific metadata. The list was `"extensions"` before any release; `nshm::sources` rejects that key. `nsh check` does not `cargo check` nshm (only crates outside the cache). Not yet: per-target support checks, web and mobile packaging checks, and an OTA check of the shell's linked modules.
+(its module) and its `nsh-core` dependency requirement, if any, must match this CLI. An entry's `"features"` (`nsh
+add --features`, object form only) are Cargo features: `AppCrate::with_features` puts them on the generated
+workspace's dependency line, `nsh add` on the app crate's; `nsh.lock` keys entries without them (`Source::place`), so
+changing features resolves nothing again. The list was `"extensions"` before any release; `nshm::sources` rejects that key. `nsh check` does not `cargo check` nshm (only crates outside the cache). Not yet: per-target support checks, web and mobile packaging checks, and an OTA check of the shell's linked modules.
+
+### What crates declare for packages (`[package.metadata.nsh]`)
+
+`crates/nsh-cli/src/module_meta.rs`. A crate (an nshm, an app crate or anything they depend on) may declare what the
+packaged app needs: `ios.info`, `ios.entitlements`, `android.permissions`, `android.queries`,
+`android.application`, at the top of `[package.metadata.nsh]` or under `features.<feature>`. The CLI runs `cargo
+metadata` on the generated workspace for the target's triple and reads every resolved package, with the features
+Cargo turned on, so a Rust app that depends on `nsh-extra` directly gets the same entries as one that lists it in
+`"modules"`. Crates' entries merge (arrays joined, a clash an error naming both); the app's `nsh.json` wins over them
+(`ModuleMeta::apply`). `package()` applies them for iOS and Android before anything reads the config; `nsh run`'s
+iOS / Catalyst host `Info.plist` and Android host manifest take them too. Keys it does not read are warned about and
+left out. Android XML is checked by element name only; `${applicationId}` becomes the package.
 
 ## Finding the runtimes
 
